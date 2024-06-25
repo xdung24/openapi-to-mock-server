@@ -38,8 +38,8 @@ type Response struct {
 	Code     int      `yaml:"code"`
 	Query    string   `yaml:"query"`
 	Headers  []Header `yaml:"headers"`
-	FilePath string   `yaml:"filePath"`
-	Body     string   `yaml:"-"` // Body is not saved in the YAML file
+	FilePath *string  `yaml:"filePath,omitempty"`
+	Body     *string  `yaml:"-"` // Body is not saved in the YAML file
 }
 
 type Header struct {
@@ -137,46 +137,59 @@ func extractResponse(operation *openapi3.Operation) []Response {
 					continue
 				}
 				examples := content.Examples
-				for exampleName, examapleObject := range examples {
-					if examapleObject == nil || examapleObject.Value == nil {
-						continue
-					}
-					body := examapleObject.Value.Value
-					if body == nil {
-						continue
-					}
-					// there are 2 types of body that we can support, string and object
-					// for string, just use it as is
-					// for object, convert it to string
+				if len(examples) > 0 {
+					for exampleName, examapleObject := range examples {
+						bodyStr := getBodyString(examapleObject)
 
-					bodyStr := ""
-					if _, ok := body.(string); ok {
-						bodyStr = fmt.Sprintf("%s", body)
-					} else {
-						jsonData, err := json.MarshalIndent(body, "", "  ")
-						if err != nil {
-							continue
+						// Create a response object
+						response := Response{
+							Name:    cleanFolderName(description),
+							Code:    code,
+							Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
+							Headers: headers,
 						}
-						bodyStr = string(jsonData)
+						if len(bodyStr) > 0 {
+							response.Body = &bodyStr
+						}
+						responses = append(responses, response)
 					}
-
-					if len(bodyStr) == 0 {
-						continue
-					}
-
+				} else {
 					responses = append(responses, Response{
 						Name:    cleanFolderName(description),
 						Code:    code,
-						Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
+						Query:   "?key=" + response + "&contentType=" + contentType,
 						Headers: headers,
-						Body:    bodyStr,
 					})
 				}
 			}
 		}
-
 	}
 	return responses
+}
+
+func getBodyString(exampleRef *openapi3.ExampleRef) string {
+	if exampleRef == nil || exampleRef.Value == nil {
+		return ""
+	}
+	examapleObject := exampleRef.Value.Value
+	if examapleObject == nil {
+		return ""
+	}
+	// there are 2 types of body that we can support, string and object
+	// for string, just use it as is
+	// for object, convert it to string
+
+	bodyStr := ""
+	if _, ok := examapleObject.(string); ok {
+		bodyStr = fmt.Sprintf("%s", examapleObject)
+	} else {
+		jsonData, err := json.MarshalIndent(examapleObject, "", "  ")
+		if err != nil {
+			return ""
+		}
+		bodyStr = string(jsonData)
+	}
+	return bodyStr
 }
 
 // cleanFolderName takes a string and returns a valid folder name by first trimming
@@ -234,20 +247,22 @@ func (m *MockServerSetting) SaveSetting() {
 			fileRelativePath := fmt.Sprintf("./data/%s/%s/%s.json", cleanFolderName(m.Name), folderRelativePath, fileName)
 			fileFullPath := fmt.Sprintf("%s/%s.json", folderFullPath, fileName)
 
-			// Save the folder path to the response
-			response.FilePath = fileRelativePath
-			m.Requests[i].Responses[j] = response
+			if response.Body != nil {
+				// Save the folder path to the response
+				response.FilePath = &fileRelativePath
+				m.Requests[i].Responses[j] = response
 
-			// Create a folder for the response
-			if _, err := os.Stat(folderFullPath); os.IsNotExist(err) {
-				if err := os.MkdirAll(folderFullPath, 0755); err != nil {
-					log.Fatalf("Failed to create response folder: %v", err)
+				// Create a folder for the response
+				if _, err := os.Stat(folderFullPath); os.IsNotExist(err) {
+					if err := os.MkdirAll(folderFullPath, 0755); err != nil {
+						log.Fatalf("Failed to create response folder: %v", err)
+					}
 				}
-			}
 
-			// Save the response body to a file
-			if err := os.WriteFile(fileFullPath, []byte(response.Body), 0644); err != nil {
-				log.Fatalf("Failed to write response body to file: %v", err)
+				// Save the response body to a file
+				if err := os.WriteFile(fileFullPath, []byte(*response.Body), 0644); err != nil {
+					log.Fatalf("Failed to write response body to file: %v", err)
+				}
 			}
 
 			log.Printf("Response body is saved to %s\n", response.FilePath)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -92,57 +93,8 @@ func getRequests(openAPISpec openapi3.T) (requests []Request) {
 		for method, operation := range pathItem.Operations() {
 			fmt.Printf("Path: %s, Method: %s, Operation: %s\n", path, method, operation.OperationID)
 
-			responses := []Response{}
-
-			// Loop through the responses
-			for response, responseItem := range operation.Responses.Map() {
-				// Get the description of the response
-				var description = ""
-				if responseItem.Value.Description != nil {
-					description = *responseItem.Value.Description
-				}
-
-				// Get the response code
-				code, err := strconv.Atoi(response)
-				if err != nil {
-					log.Fatalf("Failed to convert response code to integer: %v", err)
-				}
-				// Get the content type
-				contentType := ""
-				if responseItem.Value.Content != nil {
-					for contentType = range responseItem.Value.Content {
-						headers := []Header{
-							{Name: "Content-Type", Value: contentType},
-						}
-						content := responseItem.Value.Content[contentType]
-						if content == nil {
-							continue
-						}
-						examples := content.Examples
-						for exampleName, examapleObject := range examples {
-							if examapleObject == nil || examapleObject.Value == nil {
-								continue
-							}
-							body := examapleObject.Value.Value
-							if body == nil {
-								continue
-							}
-							bodyStr := fmt.Sprintf("%s", body)
-							if len(bodyStr) == 0 {
-								continue
-							}
-							responses = append(responses, Response{
-								Name:    cleanFolderName(description),
-								Code:    code,
-								Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
-								Headers: headers,
-								Body:    bodyStr,
-							})
-						}
-					}
-				}
-
-			}
+			// Extract the responses
+			responses := extractResponse(operation)
 
 			// Create a request object
 			requests = append(requests, Request{
@@ -154,6 +106,77 @@ func getRequests(openAPISpec openapi3.T) (requests []Request) {
 		}
 	}
 	return requests
+}
+
+func extractResponse(operation *openapi3.Operation) []Response {
+	responses := []Response{}
+
+	// Loop through the responses
+	for response, responseItem := range operation.Responses.Map() {
+		// Get the description of the response
+		var description = ""
+		if responseItem.Value.Description != nil {
+			description = *responseItem.Value.Description
+		}
+
+		// Get the response code
+		code, err := strconv.Atoi(response)
+		if err != nil {
+			log.Fatalf("Failed to convert response code to integer: %v", err)
+		}
+
+		// Get the content type
+		contentType := ""
+		if responseItem.Value.Content != nil {
+			for contentType = range responseItem.Value.Content {
+				headers := []Header{
+					{Name: "Content-Type", Value: contentType},
+				}
+				content := responseItem.Value.Content[contentType]
+				if content == nil {
+					continue
+				}
+				examples := content.Examples
+				for exampleName, examapleObject := range examples {
+					if examapleObject == nil || examapleObject.Value == nil {
+						continue
+					}
+					body := examapleObject.Value.Value
+					if body == nil {
+						continue
+					}
+					// there are 2 types of body that we can support, string and object
+					// for string, just use it as is
+					// for object, convert it to string
+
+					bodyStr := ""
+					if _, ok := body.(string); ok {
+						bodyStr = fmt.Sprintf("%s", body)
+					} else {
+						jsonData, err := json.MarshalIndent(body, "", "  ")
+						if err != nil {
+							continue
+						}
+						bodyStr = string(jsonData)
+					}
+
+					if len(bodyStr) == 0 {
+						continue
+					}
+
+					responses = append(responses, Response{
+						Name:    cleanFolderName(description),
+						Code:    code,
+						Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
+						Headers: headers,
+						Body:    bodyStr,
+					})
+				}
+			}
+		}
+
+	}
+	return responses
 }
 
 // cleanFolderName takes a string and returns a valid folder name by first trimming
@@ -183,6 +206,7 @@ func cleanFolderName(name string) string {
 func (m *MockServerSetting) CreateFolder(targetFolder string) {
 	// Clean the folder name
 	folderName := cleanFolderName(m.Name)
+
 	// Trim right slash
 	targetFolder = strings.TrimRight(targetFolder, "/")
 	targetFolder = strings.TrimRight(targetFolder, "\\")
@@ -207,7 +231,7 @@ func (m *MockServerSetting) SaveSetting() {
 			folderRelativePath := fmt.Sprintf("%s/%s/%d", request.Method, request.Name, response.Code)
 			folderFullPath := fmt.Sprintf("%s/%s", m.Folder, folderRelativePath)
 			fileName := cleanFolderName(response.Name)
-			fileRelativePath := fmt.Sprintf("./%s/%s.json", folderRelativePath, fileName)
+			fileRelativePath := fmt.Sprintf("./data/%s/%s/%s.json", cleanFolderName(m.Name), folderRelativePath, fileName)
 			fileFullPath := fmt.Sprintf("%s/%s.json", folderFullPath, fileName)
 
 			// Save the folder path to the response

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -16,14 +17,15 @@ import (
 // MockServerSetting defines the structure of mock server.
 
 type MockServerSetting struct {
-	Name           string    `yaml:"name"`
-	Description    string    `yaml:"description"`
-	Folder         string    `yaml:"-"` // Folder is not saved in the YAML file
-	Host           string    `yaml:"host"`
-	Port           int       `yaml:"port"`
-	SwaggerEnabled bool      `yaml:"swaggerEnabled"`
-	Headers        []Header  `yaml:"headers"`
-	Requests       []Request `yaml:"requests"`
+	Name           string            `yaml:"name"`
+	Description    string            `yaml:"description"`
+	Folder         string            `yaml:"-"` // Folder is not saved in the YAML file
+	Host           string            `yaml:"host"`
+	Port           int               `yaml:"port"`
+	SwaggerEnabled bool              `yaml:"swaggerEnabled"`
+	Headers        *[]Header         `yaml:"headers,omitempty"`
+	Requests       []Request         `yaml:"requests"`
+	Schemas        map[string]string `yaml:"-"`
 }
 
 type Request struct {
@@ -34,12 +36,12 @@ type Request struct {
 }
 
 type Response struct {
-	Name     string   `yaml:"name"`
-	Code     int      `yaml:"code"`
-	Query    string   `yaml:"query"`
-	Headers  []Header `yaml:"headers"`
-	FilePath *string  `yaml:"filePath,omitempty"`
-	Body     *string  `yaml:"-"` // Body is not saved in the YAML file
+	Name     string    `yaml:"name"`
+	Code     int       `yaml:"code"`
+	Query    string    `yaml:"query,omitempty"`
+	Headers  *[]Header `yaml:"headers,omitempty"`
+	FilePath *string   `yaml:"filePath,omitempty"`
+	Body     *string   `yaml:"-"` // Body is not saved in the YAML file
 }
 
 type Header struct {
@@ -73,7 +75,7 @@ func ConvertOpenAPIToMockServer(openAPISpec openapi3.T) MockServerSetting {
 		Host:           "0.0.0.0",
 		Port:           randomPort(),
 		SwaggerEnabled: true,
-		Headers:        headers,
+		Headers:        &headers,
 		Requests:       requests,
 	}
 }
@@ -89,12 +91,29 @@ func getHeaders(openAPISpec openapi3.T) []Header {
 
 // getRequests extracts the requests from the OpenAPI spec.
 func getRequests(openAPISpec openapi3.T) (requests []Request) {
+	// Loop through the components
+	schemaExamples := make(map[string]string)
+	if openAPISpec.Components != nil && openAPISpec.Components.Schemas != nil {
+		for schemaName, schemaRef := range openAPISpec.Components.Schemas {
+			schema := schemaRef.Value
+			// Extract the schema
+			schemaFullName := fmt.Sprintf("#/components/schemas/%s", schemaName)
+			schemaExample := extractSchemaExample(schema)
+			schemaExamples[schemaFullName] = schemaExample
+		}
+	}
+	// Loop through the paths
 	for path, pathItem := range openAPISpec.Paths.Map() {
 		for method, operation := range pathItem.Operations() {
 			fmt.Printf("Path: %s, Method: %s, Operation: %s\n", path, method, operation.OperationID)
 
 			// Extract the responses
-			responses := extractResponse(operation)
+			responses := extractResponse(operation, schemaExamples)
+
+			// Sort responses by code
+			sort.Slice(responses, func(i, j int) bool {
+				return responses[i].Code < responses[j].Code
+			})
 
 			// Create a request object
 			requests = append(requests, Request{
@@ -108,7 +127,7 @@ func getRequests(openAPISpec openapi3.T) (requests []Request) {
 	return requests
 }
 
-func extractResponse(operation *openapi3.Operation) []Response {
+func extractResponse(operation *openapi3.Operation, schemaExamples map[string]string) []Response {
 	responses := []Response{}
 
 	// Loop through the responses
@@ -127,40 +146,67 @@ func extractResponse(operation *openapi3.Operation) []Response {
 
 		// Get the content type
 		contentType := ""
-		if responseItem.Value.Content != nil {
-			for contentType = range responseItem.Value.Content {
-				headers := []Header{
-					{Name: "Content-Type", Value: contentType},
-				}
-				content := responseItem.Value.Content[contentType]
-				if content == nil {
-					continue
-				}
-				examples := content.Examples
-				if len(examples) > 0 {
-					for exampleName, examapleObject := range examples {
-						bodyStr := getBodyString(examapleObject)
+		if responseItem.Value != nil {
+			if responseItem.Value.Content != nil {
+				for contentType = range responseItem.Value.Content {
+					headers := []Header{
+						{Name: "Content-Type", Value: contentType},
+					}
+					content := responseItem.Value.Content[contentType]
+					if content == nil {
+						continue
+					}
+					examples := content.Examples
+					schema := content.Schema
+					if len(examples) > 0 {
+						for exampleName, examapleObject := range examples {
+							bodyStr := getBodyString(examapleObject)
 
-						// Create a response object
-						response := Response{
+							// Create a response object
+							response := Response{
+								Name:    cleanFolderName(description),
+								Code:    code,
+								Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
+								Headers: &headers,
+							}
+							if len(bodyStr) > 0 {
+								response.Body = &bodyStr
+							}
+							responses = append(responses, response)
+						}
+					} else if schema != nil && schema.Ref != "" {
+						bodyStr, ok := schemaExamples[schema.Ref]
+						if ok && bodyStr != "" {
+							responses = append(responses, Response{
+								Name:    cleanFolderName(description),
+								Code:    code,
+								Query:   "?key=" + response + "&contentType=" + contentType,
+								Headers: &headers,
+								Body:    &bodyStr,
+							})
+						} else {
+							responses = append(responses, Response{
+								Name:    cleanFolderName(description),
+								Code:    code,
+								Query:   "?key=" + response + "&contentType=" + contentType,
+								Headers: &headers,
+							})
+						}
+					} else {
+						responses = append(responses, Response{
 							Name:    cleanFolderName(description),
 							Code:    code,
-							Query:   "?key=" + response + "&contentType=" + contentType + "&name=" + exampleName,
-							Headers: headers,
-						}
-						if len(bodyStr) > 0 {
-							response.Body = &bodyStr
-						}
-						responses = append(responses, response)
+							Query:   "?key=" + response + "&contentType=" + contentType,
+							Headers: &headers,
+						})
 					}
-				} else {
-					responses = append(responses, Response{
-						Name:    cleanFolderName(description),
-						Code:    code,
-						Query:   "?key=" + response + "&contentType=" + contentType,
-						Headers: headers,
-					})
 				}
+			} else {
+				responses = append(responses, Response{
+					Name:  cleanFolderName(description),
+					Code:  code,
+					Query: "?key=" + strconv.Itoa(code),
+				})
 			}
 		}
 	}
@@ -190,6 +236,31 @@ func getBodyString(exampleRef *openapi3.ExampleRef) string {
 		bodyStr = string(jsonData)
 	}
 	return bodyStr
+}
+
+func extractSchemaExample(schema *openapi3.Schema) string {
+	om := NewOrderedMap()
+
+	schemaType := schema.Type
+	if schemaType.Is("object") {
+		// Extract the properties
+		if schema.Properties != nil {
+			for propName, propSchema := range schema.Properties {
+				childSchema := propSchema.Value
+				childSchemaType := childSchema.Type
+				if childSchemaType.Is("string") || childSchemaType.Is("integer") {
+					om.Set(propName, childSchema.Example)
+				}
+			}
+		}
+	}
+
+	// Marshal the schema to JSON
+	finalData, err := json.MarshalIndent(om, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(finalData)
 }
 
 // cleanFolderName takes a string and returns a valid folder name by first trimming
@@ -263,9 +334,8 @@ func (m *MockServerSetting) SaveSetting() {
 				if err := os.WriteFile(fileFullPath, []byte(*response.Body), 0644); err != nil {
 					log.Fatalf("Failed to write response body to file: %v", err)
 				}
+				log.Printf("Response body is saved to %s\n", *response.FilePath)
 			}
-
-			log.Printf("Response body is saved to %s\n", response.FilePath)
 		}
 	}
 
